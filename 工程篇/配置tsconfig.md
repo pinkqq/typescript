@@ -876,3 +876,210 @@ import a require("./util")
 ```
 
 注意在引入 `a` 时，是引入的当前目录。因为当 `rootDirs` 设置了 `src` 和 `out` 目录时，编译器默认它们属于同级目录。
+
+### 工程引入
+
+工程引用是 `TypeScript 3.0` 的新特性，它支持将 `TypeScript` 程序的结构分割成更小的组成部分。
+
+这样可以改善构建时间，强制在逻辑上对组件进行分离，更好地组织你的代码。
+
+`TypeScript 3.0` 还引入了 `tsc` 的一种新模式，即 `--build` 标记，它与工程引用协同工作可以加速 `TypeScript` 的构建。
+
+#### 背景
+
+有时候，我们会把多个需要单独构建的工程放在一个代码仓库中。比如现在有一个全栈项目：
+
+```
+--src
+  |--client
+      |--index.ts
+  |--server
+      |--index.ts
+  |--common (client和server公用代码)
+      |--index.ts
+--test
+  |--client.test.ts
+  |--server.test.ts
+--tsconfig.json
+```
+
+```json
+// tsconfig.json
+{
+  "compilerOptions": {
+    "target": "es5",
+    "module": "commonjs",
+    "strict": true,
+    "outDir": "./dist"
+  }
+}
+```
+
+编译之后生成的 dist 目录
+
+```
+--dist
+  |--src
+      |--client
+      |--server
+      |--common
+  |--test
+```
+
+这里我们遇到了许多问题：
+
+- 无法同时构建 test 和 src，除非把 src 和 test 放在一个输出文件夹中，但通常并不想这样做
+- 无法单独构建 client、server 和 common。
+  - 仅对实现文件的内部细节进行改动，必需再次对测试进行类型检查，尽管是不必要的
+  - 仅对测试文件进行改动，必需再次对实现文件进行类型检查，尽管其实什么都没有变
+
+那不如使用多个 `tsconfig` 文件？但这只能解决部分问题，并且又会出现新问题：
+
+- 缺少内置的实时检查，因此你得多次运行 tsc
+- 多次调用 tsc 会增加我们等待的时间
+- tsc -w 不能一次在多个配置文件上运行
+
+所以，ts 新增了工程引入。
+
+#### 什么是工程引入？
+
+工程引入可以灵活的配置输出目录，还可以使工程之间产生依赖关系，有利于将一个大的项目拆分成小项目；同时通过增量编译，可以提高编译速度。
+
+拆分后：
+
+```
+--src
+  |--client
+      |--index.ts
+      |--tsconfig.json
+  |--server
+      |--index.ts
+      |--tsconfig.json
+  |--common (client和server公用代码)
+      |--index.ts
+      |--tsconfig.json
+--test
+  |--client.test.ts
+  |--server.test.ts
+  |--tsconfig.json
+--tsconfig.json
+```
+
+```json
+// src/tsconfig.json
+{
+  "compilerOptions": {
+    "target": "es5",
+    "module": "commonJS",
+    "strict": true,
+    "composite": true, // 工程可以被引用和增量编译
+    "declaration": true // 工程引用必须
+  }
+}
+
+
+// src/client/tsconfig.json
+// 继承 tsconfig.json，依赖 ../common
+{
+  "extends": "../../tsconfig.json",
+  "references": [{ "path": "../common" }],
+  "compilerOptions": {
+    "outDir": "../../dist/client"
+  }
+}
+
+// src/server/tsconfig.json
+// 继承 tsconfig.json，依赖 ../common
+{
+  "extends": "../../tsconfig.json",
+  "references": [{ "path": "../common" }],
+  "compilerOptions": {
+    "outDir": "../../dist/server"
+  }
+}
+
+// src/common/tsconfig.json
+// 继承 tsconfig.json
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../../dist/common"
+  }
+}
+
+// src/test/tsconfig.json
+// 继承 tsconfig.json，依赖 ../server, ../client
+{
+  "extends": "../tsconfig.json",
+  "references": [{ "path": "../src/client" }, { "path": "../src/server" }]
+}
+
+```
+
+编译看一下效果如何：
+
+```
+tsc -b ../src/client --verbose
+```
+
+```
+[3:17:04 PM] Projects in this build:
+    * src/common/tsconfig.json
+    * src/client/tsconfig.json
+
+[3:17:04 PM] Project 'src/common/tsconfig.json' is out of date because output file 'dist/common/index.js' does not exist
+
+[3:17:04 PM] Building project '/Users/xqq/workspace/qq/code/geekUniversity/TypeScript/ts_in_action/src/common/tsconfig.json'...
+
+[3:17:06 PM] Project 'src/client/tsconfig.json' is out of date because output file 'dist/client/index.js' does not exist
+
+[3:17:06 PM] Building project '/Users/xqq/workspace/qq/code/geekUniversity/TypeScript/ts_in_action/src/client/tsconfig.json'...
+```
+
+client 和依赖的 common 都被构建。且生成了增量编译文件。
+
+```
+[3:17:30 PM] Projects in this build:
+    * src/common/tsconfig.json
+    * src/client/tsconfig.json
+
+[3:17:30 PM] Project 'src/common/tsconfig.json' is up to date because newest input 'src/common/index.ts' is older than oldest output 'dist/common/index.js'
+
+[3:17:30 PM] Project 'src/client/tsconfig.json' is up to date because newest input 'src/client/index.ts' is older than oldest output 'dist/client/index.js'
+```
+
+二次构建时，速度明显提升；
+
+```
+[3:19:41 PM] Projects in this build:
+    * src/common/tsconfig.json
+    * src/server/tsconfig.json
+
+[3:19:41 PM] Project 'src/common/tsconfig.json' is up to date because newest input 'src/common/index.ts' is older than oldest output 'dist/common/index.js'
+
+[3:19:41 PM] Project 'src/server/tsconfig.json' is out of date because output file 'dist/server/index.js' does not exist
+
+[3:19:41 PM] Building project '/Users/xqq/workspace/qq/code/geekUniversity/TypeScript/ts_in_action/src/server/tsconfig.json'...
+```
+
+构建 server 时，common 不会重复构建。
+
+#### `tsc -b`
+
+`tsc -b` 还支持其它一些选项：
+
+`--verbose`：打印详细的日志（可以与其它标记一起使用）
+`--dry`: 显示将要执行的操作但是并不真正进行这些操作
+`--clean`: 删除指定工程的输出（可以与--dry 一起使用）
+`--force`: 把所有工程当作非最新版本对待
+`--watch`: 观察模式（可以与--verbose 一起使用）
+
+#### 结语
+
+以上测试中，工程引入主要解决了三个问题：
+
+1. 输出目录的结构问题
+2. 单个工程的构建问题
+3. 通过增量编译，解决构建的速度问题
+
+`typescript` [官方项目](https://github.com/microsoft/TypeScript)也进行了工程引入改造。
